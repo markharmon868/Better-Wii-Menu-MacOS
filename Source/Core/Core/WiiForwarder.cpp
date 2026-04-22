@@ -26,6 +26,7 @@
 #include "DiscIO/DiscExtractor.h"
 #include "DiscIO/Enums.h"
 #include "DiscIO/Filesystem.h"
+#include "DiscIO/GameModDescriptor.h"
 #include "DiscIO/Volume.h"
 
 namespace WiiForwarder
@@ -344,13 +345,30 @@ static std::vector<u8> BuildForwarderContent(
 
 bool InstallForwarder(const std::string& disc_image_path, bool silent)
 {
+  // If the path is a GameModDescriptor (.json), resolve the base disc file for metadata
+  // but keep the JSON path for launch so Riivolution patches are applied at boot.
+  std::string volume_path = disc_image_path;
+  if (disc_image_path.size() > 5 &&
+      disc_image_path.substr(disc_image_path.size() - 5) == ".json")
+  {
+    auto descriptor = DiscIO::ParseGameModDescriptorFile(disc_image_path);
+    if (!descriptor || descriptor->base_file.empty())
+    {
+      ERROR_LOG_FMT(CORE, "WiiForwarder: Failed to parse GameModDescriptor: {}", disc_image_path);
+      if (!silent)
+        PanicAlertFmtT("Failed to parse game mod descriptor: {0}", disc_image_path);
+      return false;
+    }
+    volume_path = descriptor->base_file;
+  }
+
   // Open the disc image and extract metadata
-  std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(disc_image_path);
+  std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(volume_path);
   if (!volume)
   {
-    ERROR_LOG_FMT(CORE, "WiiForwarder: Failed to open disc image: {}", disc_image_path);
+    ERROR_LOG_FMT(CORE, "WiiForwarder: Failed to open disc image: {}", volume_path);
     if (!silent)
-      PanicAlertFmtT("Failed to open disc image: {0}", disc_image_path);
+      PanicAlertFmtT("Failed to open disc image: {0}", volume_path);
     return false;
   }
 
@@ -365,7 +383,7 @@ bool InstallForwarder(const std::string& disc_image_path, bool silent)
   const std::string game_id = volume->GetGameID(game_partition);
   if (game_id.empty())
   {
-    ERROR_LOG_FMT(CORE, "WiiForwarder: Could not read game ID from disc image: {}", disc_image_path);
+    ERROR_LOG_FMT(CORE, "WiiForwarder: Could not read game ID from disc image: {}", volume_path);
     if (!silent)
       PanicAlertFmtT("Could not read game ID from disc image.");
     return false;
@@ -379,8 +397,11 @@ bool InstallForwarder(const std::string& disc_image_path, bool silent)
     return false;
   }
 
-  // Generate forwarder title ID
-  const u64 forwarder_title_id = GenerateForwarderTitleID(game_id);
+  // For GameModDescriptor files, hash the full JSON path to get a unique title ID
+  // distinct from the base game's channel.
+  const std::string title_id_key =
+      (disc_image_path != volume_path) ? disc_image_path : game_id;
+  const u64 forwarder_title_id = GenerateForwarderTitleID(title_id_key);
 
   // Get game names for banner
   const auto long_names = volume->GetLongNames();
@@ -391,7 +412,22 @@ bool InstallForwarder(const std::string& disc_image_path, bool silent)
   if (disc_tmd.IsValid())
     ios_id = disc_tmd.GetIOSId();
 
-  // Build content with real animated banner from disc (or fallback to minimal IMET)
+  // Build content with real animated banner from disc.
+  // BuildMinimalIMET produces content without a U8 archive (no icon.bin/banner.bin/sound.bin),
+  // which causes the Wii Menu to crash when it tries to access those null data pointers.
+  // Only install if we can extract a proper opening.bnr from the disc.
+  std::vector<u8> opening_bnr = ExtractOpeningBnr(*volume, game_partition);
+  if (opening_bnr.empty())
+  {
+    ERROR_LOG_FMT(CORE, "WiiForwarder: Cannot install '{}': failed to extract opening.bnr "
+                        "(game lacks a valid animated banner)", disc_image_path);
+    if (!silent)
+      PanicAlertFmtT("Cannot add '{0}' to the Wii Menu: the disc image does not contain a "
+                     "valid channel banner (opening.bnr). Only Wii games with a proper banner "
+                     "can be added.", disc_image_path);
+    return false;
+  }
+
   const std::vector<u8> content_data =
       BuildForwarderContent(*volume, game_partition, long_names, disc_image_path);
 

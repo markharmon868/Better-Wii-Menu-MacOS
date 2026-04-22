@@ -122,7 +122,10 @@ IPCReply ESDevice::ReadContent(u32 uid, const IOCtlVRequest& request)
 
     INFO_LOG_FMT(IOS_ES, "ReadContent(uid={:#x}, cfd={}, size={}, addr={:08x})", uid, cfd, size,
                  addr);
-    return m_core.ReadContent(cfd, memory.GetPointerForRange(addr, size), size, uid, ticks);
+    u8* buffer = memory.GetPointerForRange(addr, size);
+    if (!buffer)
+      return ES_EINVAL;
+    return m_core.ReadContent(cfd, buffer, size, uid, ticks);
   });
 }
 
